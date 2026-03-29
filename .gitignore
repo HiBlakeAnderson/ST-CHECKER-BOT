@@ -67,3 +67,6 @@ attached_assets/
 
 # README — kept local only, not published to GitHub
 README.md
+
+# EC2 SSH private key — never push to GitHub
+ec2_key.pem
