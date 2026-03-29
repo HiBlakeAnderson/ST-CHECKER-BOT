@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing / coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Log files
+*.log
+webhook.log
+update.log
+bot.log
+
+# Environment / Secrets — NEVER commit these
+.env
+.env.*
+!.env.example
+
+# Runtime data files — contain user data and keys
+data.json
+user_proxies.json
+user_amounts.json
+used_codes.json
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Card list (sensitive content)
+combo.txt
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDEs
+/.idea
+.vscode/*
+!.vscode/settings.json
+*.sublime-workspace
+
+# Replit managed
+.cache/
+.local/
+.upm/
+.pythonlibs/
+
+# Attached assets (user uploads — not needed in repo)
+attached_assets/
+
+# README — kept local only, not published to GitHub
+README.md
