@@ -1,0 +1,16 @@
+pyTelegramBotAPI
+user_agent
+requests
+faker
+beautifulsoup4
+cloudscraper
+urllib3
+requests-toolbelt
+PyJWT
+fake-useragent
+colorama
+flask
+pysocks
+tele
+schedule
+PySocks
