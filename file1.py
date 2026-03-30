@@ -18,6 +18,8 @@ import string
 from telebot import types
 from gatet import *
 from datetime import datetime, timedelta
+from shopify_checker import run_check as _sp_check, extract_clean_response as _sp_clean, fetch_products as _sp_fetch_products
+import asyncio as _sp_asyncio
 from faker import Faker
 import threading
 from bs4 import BeautifulSoup
@@ -2299,6 +2301,7 @@ def cmds_command(message):
         "  🛡️ /vbvm » Braintree 3DS Mass  <i>└ up to 500 cards</i>\n"
         "  🟢 /b3   » Braintree $0 Auth  <i>└ bandc gate · $0 · no charge on card</i>\n"
         "  🔵 /wcs  » WooCommerce Stripe Auth  <i>└ /wcs https://site.com card · $0</i>\n"
+        "  🛒 /sp   » Auto Shopify v5  <i>└ /sp https://store.myshopify.com card · real checkout</i>\n"
         "  ⚡ /st   » Stripe Charge  <i>└ direct · ultra fast</i>\n"
         "  🔐 /sa   » Stripe Auth Only  <i>└ no charge</i>\n"
         "  🚀 /stm  » Stripe Mass  <i>└ multiple cards</i>\n"
@@ -6277,6 +6280,228 @@ def wcs_command(message):
         try:
             bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id,
                                   text=build_wcs_msg("✅ DONE"), parse_mode='HTML')
+        except: pass
+
+    threading.Thread(target=my_function).start()
+
+
+# ================== /sp — Auto Shopify v5 Checker ==================
+def _sp_status(msg_code, success_flag):
+    """Map Shopify result code → (emoji, label, is_hit)."""
+    code = (msg_code or '').upper()
+    if code == 'ORDER_PLACED':
+        return '💰', 'CHARGED', True
+    if 'OTP' in code or 'ACTION_REQUIRED' in code or 'CHALLENGE' in code:
+        return '⚡', 'OTP/3DS', True
+    if code in ('CARD_DECLINED','PAYMENTS_CARD_DECLINED','CARD_VELOCITY_EXCEEDED',
+                'PAYMENTS_CARD_VELOCITY_EXCEEDED','CALL_ISSUER','DO_NOT_HONOR',
+                'FRAUDULENT','GENERIC_DECLINE'):
+        return '❌', 'Dead', False
+    if 'INSUFFICIENT' in code:
+        return '💳', 'Insufficient Funds', True
+    if 'CAPTCHA' in code or 'THROTTLE' in code.upper():
+        return '🔴', 'Error', False
+    if not success_flag:
+        return '🔴', 'Error', False
+    return '❌', 'Dead', False
+
+
+@bot.message_handler(commands=["sp"])
+def sp_command(message):
+    def my_function():
+        uid = message.from_user.id
+        with open("data.json", 'r', encoding='utf-8') as f:
+            json_data = json.load(f)
+        try:
+            BL = json_data[str(uid)]['plan']
+        except:
+            BL = '𝗙𝗥𝗘𝗘'
+        if BL == '𝗙𝗥𝗘𝗘' and uid != admin:
+            bot.reply_to(message, "<b>❌ This command is only for VIP users.</b>", parse_mode='HTML')
+            return
+
+        usage_msg = (
+            "<b>🛒 Auto Shopify v5 Checker\n"
+            "━━━━━━━━━━━━━━━━\n"
+            "💡 <i>Real Shopify checkout · auto product · hCap bypass</i>\n\n"
+            "📌 Single card:\n"
+            "<code>/sp https://store.myshopify.com 4111111111111111|12|2026|123</code>\n\n"
+            "📌 Multi card (max 30):\n"
+            "<code>/sp https://store.myshopify.com\n"
+            "4111111111111111|12|2026|123\n"
+            "5218071175156668|02|2026|574</code>\n\n"
+            "📊 Results:\n"
+            "💰 Charged  ⚡ OTP  ❌ Dead  🔴 Error\n"
+            "━━━━━━━━━━━━━━━━\n"
+            "⚠️ <i>VIP only · real purchase attempt · charges may apply on live cards</i></b>"
+        )
+
+        # ── Parse site + cards ────────────────────────────────────────────
+        try:
+            lines = message.text.split('\n')
+            first_parts = lines[0].split(None, 2)
+            if len(first_parts) < 2:
+                raise IndexError
+            site_url = first_parts[1].strip()
+            if not site_url.startswith('http') and '.' not in site_url:
+                raise ValueError
+
+            raw_lines = []
+            if len(first_parts) == 3:
+                raw_lines.append(first_parts[2])
+            if len(lines) > 1:
+                raw_lines += [l.strip() for l in lines[1:] if l.strip()]
+        except (IndexError, ValueError):
+            bot.reply_to(message, usage_msg, parse_mode='HTML')
+            return
+
+        card_lines = []
+        for rl in raw_lines:
+            cc = _extract_cc(rl)
+            if cc:
+                card_lines.append(cc)
+
+        if not card_lines:
+            bot.reply_to(message, usage_msg if not raw_lines else
+                "<b>❌ Invalid card format.\n"
+                "Correct: <code>4111111111111111|12|2026|123</code></b>", parse_mode='HTML')
+            return
+
+        if len(card_lines) > 30:
+            bot.reply_to(message, "<b>❌ Maximum 30 cards at a time for Shopify.</b>", parse_mode='HTML')
+            return
+
+        log_command(message, query_type='gateway', gateway='shopify_v5')
+
+        # ── Single card ────────────────────────────────────────────────────
+        if len(card_lines) == 1:
+            card   = card_lines[0]
+            parts  = card.split('|')
+            cc, mm, yy, cvv = parts[0], parts[1], parts[2], parts[3].strip()
+            bin_num = cc[:6]
+            bin_info, bank, country, country_code = get_bin_info(bin_num)
+
+            msg = bot.reply_to(message,
+                f"<b>⏳ Checking [Shopify v5]...\n"
+                f"🛒 Site: <code>{site_url[:50]}</code>\n"
+                f"💳 Card: <code>{card}</code></b>", parse_mode='HTML')
+
+            success, response, gateway, price, currency = _sp_check(cc, mm, yy, cvv, site_url)
+            clean_code = _sp_clean(response)
+            em, word, is_hit = _sp_status(clean_code, success)
+            log_card_check(uid, card, 'shopify_v5', clean_code[:80])
+
+            try:
+                price_f = f"{float(price):.2f}"
+            except Exception:
+                price_f = price
+
+            out = (
+                f"<b>{em} {word}  ❯  <code>{card}</code>\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"🏦 BIN: {bin_num}  •  {bin_info}\n"
+                f"🏛️ Bank: {bank}\n"
+                f"🌍 Country: {country} {country_code}\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"🛒 Site: {site_url[:50]}\n"
+                f"🏷️ Gateway: {gateway[:40]}\n"
+                f"💵 Price: {price_f} {currency}\n"
+                f"💬 Msg: {clean_code[:80]}\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"[⌤] Bot by @yadistan</b>"
+            )
+            bot.edit_message_text(out, message.chat.id, msg.message_id, parse_mode='HTML')
+            return
+
+        # ── Bulk ──────────────────────────────────────────────────────────
+        total    = len(card_lines)
+        charged  = dead = err = otp = checked = 0
+        results_lines = []
+        hits = []
+
+        stop_kb = types.InlineKeyboardMarkup()
+        stop_kb.add(types.InlineKeyboardButton(text="🛑 Stop", callback_data='stop'))
+        try:
+            stopuser[f'{uid}']['status'] = 'start'
+        except:
+            stopuser[f'{uid}'] = {'status': 'start'}
+
+        msg = bot.reply_to(message,
+            f"<b>🛒 Shopify v5 Checker\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🌐 {site_url[:45]}\n"
+            f"📋 Total: {total} cards\n⏳ Starting...</b>",
+            reply_markup=stop_kb, parse_mode='HTML')
+
+        def build_sp_msg(status_text="⏳ Checking..."):
+            header = (f"<b>🛒 Shopify v5 | {status_text}\n"
+                      f"━━━━━━━━━━━━━━━━━━━━\n"
+                      f"🌐 {site_url[:45]}\n"
+                      f"📊 {checked}/{total} | 💰 {charged} | ⚡ {otp} | ❌ {dead} | 🔴 {err}\n"
+                      f"━━━━━━━━━━━━━━━━━━━━\n")
+            body = "\n".join(results_lines[-10:])
+            footer_hits = ""
+            if hits:
+                hits_lines = "".join(
+                    f"\n{hem} <b>{hw}</b>\n<code>{hcc}</code>\n"
+                    f"<b>Msg:</b> {hcode[:60]}\n"
+                    f"<b>Price:</b> {hprice} {hcur}\n"
+                    for hcc, hcode, hprice, hcur, hem, hw in hits[-5:]
+                )
+                footer_hits = f"\n━━━━━━━━━━━━━━━━━━━━\n🎯 HITS ({len(hits)}):" + hits_lines
+            full = header + body + footer_hits + "\n━━━━━━━━━━━━━━━━━━━━\n[⌤] Bot by @yadistan</b>"
+            if len(full) > 4000:
+                full = header + "\n".join(results_lines[-5:]) + footer_hits + "\n[⌤] Bot by @yadistan</b>"
+            return full
+
+        for cc_raw in card_lines:
+            if stopuser.get(f'{uid}', {}).get('status') == 'stop':
+                try:
+                    bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id,
+                                          text=build_sp_msg("🛑 STOPPED"), parse_mode='HTML')
+                except: pass
+                return
+
+            parts = cc_raw.split('|')
+            cc_n, mm, yy, cvv = parts[0], parts[1], parts[2], parts[3].strip()
+            success, response, gateway, price, currency = _sp_check(cc_n, mm, yy, cvv, site_url)
+            checked += 1
+            clean_code = _sp_clean(response)
+            em, word, is_hit = _sp_status(clean_code, success)
+            log_card_check(uid, cc_raw, 'shopify_v5', clean_code[:80])
+
+            try:
+                price_f = f"{float(price):.2f}"
+            except Exception:
+                price_f = price
+
+            if word == 'CHARGED':
+                charged += 1
+                hits.append((cc_raw, clean_code, price_f, currency, em, word))
+            elif word == 'OTP/3DS':
+                otp += 1
+                hits.append((cc_raw, clean_code, price_f, currency, em, word))
+            elif word == 'Insufficient Funds':
+                dead += 1
+                hits.append((cc_raw, clean_code, price_f, currency, em, word))
+            elif word == 'Error':
+                err += 1
+            else:
+                dead += 1
+
+            results_lines.append(f"{em} <b>{word}</b> — {clean_code[:45]}  ❯  <code>{cc_raw}</code>")
+
+            if checked % 3 == 0 or checked == total:
+                try:
+                    bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id,
+                                          text=build_sp_msg(), parse_mode='HTML', reply_markup=stop_kb)
+                    time.sleep(0.5)
+                except Exception:
+                    time.sleep(1)
+
+        try:
+            bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id,
+                                  text=build_sp_msg("✅ DONE"), parse_mode='HTML')
         except: pass
 
     threading.Thread(target=my_function).start()
