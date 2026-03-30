@@ -4876,7 +4876,13 @@ def ah_command(message):
                 card_lines.append(_cc)
 
         if not card_lines:
-            bot.reply_to(message, usage_msg, parse_mode='HTML')
+            if raw_lines:
+                bot.reply_to(message,
+                    "<b>❌ Invalid card format.</b>\n"
+                    "Correct format: <code>4111111111111111|12|26|123</code>",
+                    parse_mode='HTML')
+            else:
+                bot.reply_to(message, usage_msg, parse_mode='HTML')
             return
 
         # Multi-card inline
