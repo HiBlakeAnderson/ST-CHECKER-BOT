@@ -4628,18 +4628,32 @@ def _ah_call(url, card, uid=None):
 
 def _ah_emoji(d):
     s = d.get("status", "").lower()
-    if s in ("charged", "approved"): return "✅"
-    if s == "live":                   return "⚡"
-    if s == "live_declined":          return "⚠️"
-    if s == "error":                  return "🔴"
+    m = d.get("message", "").lower()
+    if s in ("charged", "approved"):          return "✅"
+    if s == "live":                            return "⚡"
+    if s in ("live_declined",):
+        if any(x in m for x in ("insufficient", "funds", "balance")): return "💳"
+        if any(x in m for x in ("otp", "3d", "authenticate", "secure", "challenge", "verify")): return "🔐"
+        return "⚠️"
+    if s == "error":                           return "🔴"
+    # dead — check message for sub-type
+    if any(x in m for x in ("otp", "3d", "authenticate", "secure", "challenge", "verify")): return "🔐"
+    if any(x in m for x in ("insufficient", "funds", "balance")):                           return "💳"
     return "❌"
 
 def _ah_word(d):
     s = d.get("status", "").lower()
-    if s in ("charged", "approved"): return "Charged"
-    if s == "live":                   return "Live"
-    if s == "live_declined":          return "Live/Declined"
-    if s == "error":                  return "Error"
+    m = d.get("message", "").lower()
+    if s in ("charged", "approved"):          return "Charged"
+    if s == "live":                            return "Live"
+    if s == "live_declined":
+        if any(x in m for x in ("insufficient", "funds", "balance")): return "Insufficient Funds"
+        if any(x in m for x in ("otp", "3d", "authenticate", "secure", "challenge", "verify")): return "OTP"
+        return "Declined"
+    if s == "error":                           return "Error"
+    # dead — check message for sub-type
+    if any(x in m for x in ("otp", "3d", "authenticate", "secure", "challenge", "verify")): return "OTP"
+    if any(x in m for x in ("insufficient", "funds", "balance")):                           return "Insufficient Funds"
     return "Dead"
 
 @bot.message_handler(commands=["ah"])
@@ -4682,7 +4696,7 @@ def ah_command(message):
         def _run_ah_bulk(checkout_url, card_lines, src_label):
             gate  = _ah_gate(checkout_url)
             total = len(card_lines)
-            charged = live = dead = err = checked = 0
+            charged = live = dead = err = otp = insuf = checked = 0
             hits = []
             results_lines = []
 
@@ -4706,7 +4720,7 @@ def ah_command(message):
                 header = (f"<b>🔥 Auto Hitter [{gate.upper()}] | {status_text}\n"
                           f"━━━━━━━━━━━━━━━━━━━━\n"
                           f"📋 {src_label}\n"
-                          f"📊 {checked}/{total} | ✅ {charged} | ⚡ {live} | ❌ {dead} | 🔴 {err}\n"
+                          f"📊 {checked}/{total} | ✅ {charged} | ⚡ {live} | 🔐 {otp} | 💳 {insuf} | ❌ {dead} | 🔴 {err}\n"
                           f"━━━━━━━━━━━━━━━━━━━━\n")
                 body = "\n".join(results_lines[-10:])
                 footer_hits = ""
@@ -4736,8 +4750,9 @@ def ah_command(message):
                 checked += 1
                 log_card_check(id, cc, 'ah_hitter', result.get('message', '')[:80])
 
-                em = _ah_emoji(result)
-                s  = result.get("status", "").lower()
+                em   = _ah_emoji(result)
+                s    = result.get("status", "").lower()
+                word = _ah_word(result)
                 if s in ("charged", "approved"):
                     charged += 1
                     hits.append((cc, result, em))
@@ -4746,6 +4761,10 @@ def ah_command(message):
                     hits.append((cc, result, em))
                 elif s == "error":
                     err += 1
+                elif word == "OTP":
+                    otp += 1
+                elif word == "Insufficient Funds":
+                    insuf += 1
                 else:
                     dead += 1
 
