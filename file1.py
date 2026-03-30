@@ -4837,25 +4837,34 @@ def ah_command(message):
 
         # ── Mode 3: Inline URL + card(s) ─────────────────────────────────
         try:
-            lines      = message.text.split('\n')
+            lines = message.text.split('\n')
             first_rest = lines[0].split(' ', 1)
-            if len(first_rest) < 2:
-                raise IndexError
-            if len(lines) > 1:
+
+            # Case A: /ah\nhttps://...\ncard1\ncard2
+            if len(first_rest) < 2 or not first_rest[1].strip():
+                # URL must be on line 2
+                if len(lines) < 2 or not lines[1].strip().startswith('http'):
+                    raise IndexError
+                checkout_url = lines[1].strip()
+                raw_lines    = [l.strip() for l in lines[2:] if l.strip()]
+
+            # Case B: /ah https://...\ncard1\ncard2  OR  /ah https://... card
+            elif len(lines) > 1:
                 checkout_url = first_rest[1].strip()
                 raw_lines    = [l.strip() for l in lines[1:] if l.strip()]
+
+            # Case C: /ah https://... card  (single line)
             else:
                 parts2 = first_rest[1].strip().split()
                 if len(parts2) < 2:
                     raise IndexError
                 checkout_url = parts2[0]
                 raw_lines    = [' '.join(parts2[1:])]
+
+            if not checkout_url.startswith('http'):
+                raise ValueError
         except (IndexError, ValueError):
             bot.reply_to(message, usage_msg, parse_mode='HTML')
-            return
-
-        if not checkout_url.startswith('http'):
-            bot.reply_to(message, "<b>❌ Invalid URL.</b>", parse_mode='HTML')
             return
 
         card_lines = []
