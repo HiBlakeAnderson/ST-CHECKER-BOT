@@ -4768,8 +4768,10 @@ def ah_command(message):
                 else:
                     dead += 1
 
+                _msg = result.get("message", "")
+                _msg_short = f" — {_msg[:60]}" if _msg else ""
                 results_lines.append(
-                    f"{em} <b>{_ah_word(result)}</b>  ❯  <code>{cc}</code>"
+                    f"{em} <b>{_ah_word(result)}</b>{_msg_short}  ❯  <code>{cc}</code>"
                 )
 
                 if checked % 5 == 0 or checked == total:
