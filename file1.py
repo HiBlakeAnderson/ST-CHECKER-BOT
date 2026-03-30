@@ -1021,7 +1021,7 @@ def passed_gate(ccx, proxy_dict=None):
         }
         
         json_data = {
-            'amount': '2.99',
+            'amount': '2.00',
             'additionalInfo': {},
             'bin': binn,
             'dfReferenceId': reid,
@@ -2295,7 +2295,7 @@ def cmds_command(message):
         "- ‐ - ‐ - ‐ - ‐ - ‐ - ‐ - ‐ -\n"
         f"💳 ──[ PAYMENT GATEWAYS  {lock} VIP ]── 💳\n"
         f"  💰 /pp   » PayPal  <i>└ charge ${current_amount}</i>\n"
-        "  🛡️ /vbv  » Braintree 3DS Single  <i>└ $2.99 auth</i>\n"
+        "  🛡️ /vbv  » Braintree 3DS Single  <i>└ $2.00 auth</i>\n"
         "  🛡️ /vbvm » Braintree 3DS Mass  <i>└ up to 50 cards</i>\n"
         "  ⚡ /st   » Stripe Charge  <i>└ direct · ultra fast</i>\n"
         "  🔐 /sa   » Stripe Auth Only  <i>└ no charge</i>\n"
@@ -2480,7 +2480,7 @@ def passed_command(message):
             return
         
         log_command(message, query_type='gateway', gateway='vbv')
-        msg = bot.reply_to(message, f"<b>𝗖𝗵𝗲𝗰𝗸𝗶𝗻𝗴 𝗰𝗮𝗿𝗱 𝘄𝗶𝘁𝗵 𝗣𝗮𝘀𝘀𝗲𝗱 𝗚𝗮𝘁𝗲𝘄𝗮𝘆... ⏳\n💰 𝗔𝗺𝗼𝘂𝗻𝘁: $2.99</b>")
+        msg = bot.reply_to(message, f"<b>𝗖𝗵𝗲𝗰𝗸𝗶𝗻𝗴 𝗰𝗮𝗿𝗱 𝘄𝗶𝘁𝗵 𝗣𝗮𝘀𝘀𝗲𝗱 𝗚𝗮𝘁𝗲𝘄𝗮𝘆... ⏳\n💰 𝗔𝗺𝗼𝘂𝗻𝘁: $2.00</b>")
         
         bin_num = card[:6]
         bin_info, bank, country, country_code = get_bin_info(bin_num)
@@ -2502,12 +2502,12 @@ def passed_command(message):
         minux_button = types.InlineKeyboardButton(text="YADISTAN - 🍀", url="https://t.me/yadistan")
         minux_keyboard.add(minux_button)
         
-        formatted_message = f"""<b>#passed_Gateway $2.99 🔥
+        formatted_message = f"""<b>#passed_Gateway $2.00 🔥
 - - - - - - - - - - - - - - - - - - - - - - -
 [ϟ] 𝗖𝗮𝗿𝗱: <code>{card}</code>
 [ϟ] 𝗦𝘁𝗮𝘁𝘂𝘀: {result} {status_emoji}
 [ϟ] 𝗥𝗲𝘀𝗽𝗼𝗻𝘀𝗲: {result}!
-[ϟ] 𝗔𝗺𝗼𝘂𝗻𝘁: $2.99
+[ϟ] 𝗔𝗺𝗼𝘂𝗻𝘁: $2.00
 - - - - - - - - - - - - - - - - - - - - - - -
 [ϟ] 𝗕𝗶𝗻: {bin_info}
 [ϟ] 𝗕𝗮𝗻𝗸: {bank}
@@ -6166,7 +6166,7 @@ def menu_callback_passed(call):
         live_cards = []
         
         
-        bot.edit_message_text(chat_id=call.message.chat.id,message_id=call.message.message_id,text= f"𝗖𝗵𝗲𝗰𝗸𝗶𝗻𝗴 𝗬𝗼𝘂𝗿 𝗖𝗮𝗿𝗱𝘀 𝘄𝗶𝘁𝗵 𝗣𝗮𝘀𝘀𝗲𝗱...⌛\n💰 𝗔𝗺𝗼𝘂𝗻𝘁: $2.99")
+        bot.edit_message_text(chat_id=call.message.chat.id,message_id=call.message.message_id,text= f"𝗖𝗵𝗲𝗰𝗸𝗶𝗻𝗴 𝗬𝗼𝘂𝗿 𝗖𝗮𝗿𝗱𝘀 𝘄𝗶𝘁𝗵 𝗣𝗮𝘀𝘀𝗲𝗱...⌛\n💰 𝗔𝗺𝗼𝘂𝗻𝘁: $2.00")
         try:
             with open("combo.txt", 'r') as file:
                 lino = file.readlines()
@@ -6245,7 +6245,7 @@ def menu_callback_passed(call):
 ━━━━━━━━━━━━━━━━━
 [⌤] 𝗕𝗼𝘁 𝗯𝘆 @yadistan</b>''', reply_markup=done_kb, parse_mode='HTML')
         if live_cards:
-            hits_text = f"<b>🛡️ #vbv_Gateway $2.99 — 𝗛𝗶𝘁𝘀 [{len(live_cards)}]\n━━━━━━━━━━━━━━━━━\n"
+            hits_text = f"<b>🛡️ #vbv_Gateway $2.00 — 𝗛𝗶𝘁𝘀 [{len(live_cards)}]\n━━━━━━━━━━━━━━━━━\n"
             hits_text += "\n".join(live_cards)
             hits_text += f"\n━━━━━━━━━━━━━━━━━\n[⌤] 𝗕𝗼𝘁 𝗯𝘆 @yadistan</b>"
             bot.send_message(call.from_user.id, hits_text, parse_mode='HTML', reply_markup=done_kb)
