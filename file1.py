@@ -2296,7 +2296,7 @@ def cmds_command(message):
         f"💳 ──[ PAYMENT GATEWAYS  {lock} VIP ]── 💳\n"
         f"  💰 /pp   » PayPal  <i>└ charge ${current_amount}</i>\n"
         "  🛡️ /vbv  » Braintree 3DS Single  <i>└ $2.00 auth</i>\n"
-        "  🛡️ /vbvm » Braintree 3DS Mass  <i>└ up to 50 cards</i>\n"
+        "  🛡️ /vbvm » Braintree 3DS Mass  <i>└ up to 500 cards</i>\n"
         "  ⚡ /st   » Stripe Charge  <i>└ direct · ultra fast</i>\n"
         "  🔐 /sa   » Stripe Auth Only  <i>└ no charge</i>\n"
         "  🚀 /stm  » Stripe Mass  <i>└ multiple cards</i>\n"
@@ -5496,8 +5496,8 @@ def vbvm_command(message):
         if not cards:
             bot.reply_to(message, "<b>𝗖𝗼𝗿𝗿𝗲𝗰𝘁 𝘂𝘀𝗮𝗴𝗲:\n/vbvm card1\ncard2\ncard3</b>")
             return
-        if len(cards) > 50:
-            bot.reply_to(message, "<b>❌ 𝗠𝗮𝘅𝗶𝗺𝘂𝗺 50 𝗰𝗮𝗿𝗱𝘀 𝗮𝘁 𝗮 𝘁𝗶𝗺𝗲.</b>")
+        if len(cards) > 500:
+            bot.reply_to(message, "<b>❌ 𝗠𝗮𝘅𝗶𝗺𝘂𝗺 500 𝗰𝗮𝗿𝗱𝘀 𝗮𝘁 𝗮 𝘁𝗶𝗺𝗲.</b>")
             return
         total = len(cards)
         proxy = get_proxy_dict(id)
