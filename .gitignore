@@ -70,3 +70,6 @@ README.md
 
 # EC2 SSH private key — never push to GitHub
 ec2_key.pem
+
+# bandc.com checker accounts — sensitive, keep local only
+bandc_accounts.json
